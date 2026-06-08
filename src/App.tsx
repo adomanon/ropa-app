@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import './App.css'
 import { appDb, ensureSeedData } from './db'
-import { fileToOptimizedDataUrl } from './lib/image'
+import { fileToOptimizedDataUrl, processImageForWardrobe } from './lib/image'
 import type { Garment, GarmentStatus, Outfit } from './types'
 import { CATEGORIES, COLOR_OPTIONS } from './types'
 
@@ -22,7 +22,6 @@ const slotGroups: Record<string, string[]> = {
 type TabId = (typeof tabs)[number]['id']
 
 type GarmentFormState = {
-  name: string
   category: string
   brand: string
   color: string
@@ -30,6 +29,8 @@ type GarmentFormState = {
   notes: string
   status: GarmentStatus
   imageDataUrl: string
+  rotation: number
+  removeBackground: boolean
 }
 
 function App() {
@@ -50,7 +51,6 @@ function App() {
   const [outfitImageDataUrl, setOutfitImageDataUrl] = useState<string>()
 
   const [form, setForm] = useState<GarmentFormState>({
-    name: '',
     category: CATEGORIES[0],
     brand: '',
     color: COLOR_OPTIONS[0],
@@ -58,6 +58,8 @@ function App() {
     notes: '',
     status: 'clean' as GarmentStatus,
     imageDataUrl: '',
+    rotation: 0,
+    removeBackground: true,
   })
 
   async function loadData() {
@@ -95,7 +97,7 @@ function App() {
       return
     }
     const imageDataUrl = await fileToOptimizedDataUrl(file)
-    setForm((prev) => ({ ...prev, imageDataUrl }))
+    setForm((prev) => ({ ...prev, imageDataUrl, rotation: 0, removeBackground: true }))
   }
 
   async function handleOutfitImageChange(file?: File) {
@@ -107,24 +109,30 @@ function App() {
   }
 
   async function addGarment() {
-    if (!form.name.trim()) {
+    if (!form.category.trim()) {
       return
     }
 
+    const imageDataUrl = form.imageDataUrl
+      ? await processImageForWardrobe(form.imageDataUrl, {
+          rotation: form.rotation,
+          removeWhiteBackground: form.removeBackground,
+        })
+      : undefined
+
     await appDb.garments.add({
-      name: form.name.trim(),
+      name: `${form.category}${form.brand.trim() ? ` · ${form.brand.trim()}` : ''}`,
       category: form.category,
       brand: form.brand.trim() || 'Sin marca',
       color: form.color,
       size: form.size.trim() || 'N/A',
       notes: form.notes.trim(),
       status: form.status,
-      imageDataUrl: form.imageDataUrl || undefined,
+      imageDataUrl,
       createdAt: Date.now(),
     })
 
     setForm({
-      name: '',
       category: CATEGORIES[0],
       brand: '',
       color: COLOR_OPTIONS[0],
@@ -132,8 +140,14 @@ function App() {
       notes: '',
       status: 'clean',
       imageDataUrl: '',
+      rotation: 0,
+      removeBackground: true,
     })
     await loadData()
+  }
+
+  function rotateDraftImage() {
+    setForm((prev) => ({ ...prev, rotation: (prev.rotation + 90) % 360 }))
   }
 
   async function toggleGarmentStatus(garment: Garment) {
@@ -156,9 +170,67 @@ function App() {
     await loadData()
   }
 
+  async function deleteGarment(garment: Garment) {
+    if (!garment.id) {
+      return
+    }
+
+    await appDb.transaction('rw', appDb.garments, appDb.outfits, async () => {
+      await appDb.garments.delete(garment.id)
+      const allOutfits = await appDb.outfits.toArray()
+      await Promise.all(
+        allOutfits
+          .filter((outfit) => outfit.garmentIds.includes(garment.id!))
+          .map((outfit) =>
+            appDb.outfits.update(outfit.id!, {
+              garmentIds: outfit.garmentIds.filter((id) => id !== garment.id),
+            }),
+          ),
+      )
+    })
+
+    setSelectedBySlot((prev) => {
+      const next: Record<string, number> = {}
+      for (const [slot, id] of Object.entries(prev)) {
+        if (id !== garment.id) {
+          next[slot] = id
+        }
+      }
+      return next
+    })
+
+    await loadData()
+  }
+
   function getSlotItems(slot: string) {
     const categories = slotGroups[slot] ?? [slot]
     return garments.filter((g) => categories.includes(g.category) && g.status === 'clean')
+  }
+
+  function getSelectedSlotGarment(slot: string, slotItems: Garment[]) {
+    const selectedId = selectedBySlot[slot]
+    return slotItems.find((garment) => garment.id === selectedId) ?? slotItems[0]
+  }
+
+  function moveSlotSelection(slot: string, direction: 1 | -1) {
+    const slotItems = getSlotItems(slot)
+    if (!slotItems.length) {
+      return
+    }
+
+    const currentIndex = Math.max(
+      0,
+      slotItems.findIndex((garment) => garment.id === selectedBySlot[slot]),
+    )
+    const nextIndex = (currentIndex + direction + slotItems.length) % slotItems.length
+    const nextItem = slotItems[nextIndex]
+
+    const nextGarmentId = nextItem.id
+    if (typeof nextGarmentId !== 'number') {
+      return
+    }
+
+    setSelectedBySlot((prev) => ({ ...prev, [slot]: nextGarmentId }))
   }
 
   const selectedGarments = useMemo(() => {
@@ -234,12 +306,8 @@ function App() {
       {activeTab === 'armario' && (
         <section className="panel">
           <h2>Subir prenda</h2>
+          <p className="hint">El nombre se genera solo con la categoria y la marca; no tienes que escribirlo.</p>
           <div className="grid-two">
-            <input
-              placeholder="Nombre de la prenda"
-              value={form.name}
-              onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
-            />
             <select
               value={form.category}
               onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}
@@ -293,6 +361,33 @@ function App() {
                 onChange={(event) => void handleGarmentImageChange(event.target.files?.[0])}
               />
             </label>
+            <div className="preview-toolbar span-two">
+              <button type="button" onClick={rotateDraftImage} disabled={!form.imageDataUrl}>
+                Rotar 90°
+              </button>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={form.removeBackground}
+                  onChange={(event) =>
+                    setForm((prev) => ({ ...prev, removeBackground: event.target.checked }))
+                  }
+                />
+                <span>Quitar fondo blanco</span>
+              </label>
+            </div>
+            <div className="preview-shell span-two">
+              {form.imageDataUrl ? (
+                <img
+                  className="preview-image"
+                  src={form.imageDataUrl}
+                  alt="Vista previa de la prenda"
+                  style={{ transform: `rotate(${form.rotation}deg)` }}
+                />
+              ) : (
+                <div className="img-fallback large">Sin foto todavia</div>
+              )}
+            </div>
           </div>
           <button type="button" className="cta" onClick={() => void addGarment()}>
             Guardar prenda
@@ -347,17 +442,23 @@ function App() {
                   <div className="img-fallback">Sin foto</div>
                 )}
                 <div className="garment-meta">
-                  <strong>{garment.name}</strong>
-                  <span>{garment.category}</span>
+                  <strong>{garment.category}</strong>
                   <span>
-                    {garment.brand} · {garment.color}
+                    {garment.brand} · {garment.color} · {garment.size}
                   </span>
+                  <span>{garment.notes || 'Sin notas'}</span>
                 </div>
-                <button type="button" onClick={() => void toggleGarmentStatus(garment)}>
-                  {garment.status === 'clean' ? 'Marcar sucia' : 'Marcar limpia'}
-                </button>
+                <div className="card-actions">
+                  <button type="button" onClick={() => void toggleGarmentStatus(garment)}>
+                    {garment.status === 'clean' ? 'Marcar sucia' : 'Marcar limpia'}
+                  </button>
+                  <button type="button" className="danger" onClick={() => void deleteGarment(garment)}>
+                    Eliminar
+                  </button>
+                </div>
               </article>
             ))}
+            {!filteredGarments.length && <p className="hint">No hay prendas con esos filtros.</p>}
           </div>
         </section>
       )}
@@ -365,7 +466,7 @@ function App() {
       {activeTab === 'combinar' && (
         <section className="panel">
           <h2>Creador de combinaciones</h2>
-          <p className="hint">Desliza y toca para elegir una prenda por bloque.</p>
+          <p className="hint">Desliza hacia los lados o usa las flechas para cambiar la prenda de cada bloque.</p>
 
           <div className="slot-actions">
             <select
@@ -390,6 +491,7 @@ function App() {
 
           {builderSlots.map((slot) => {
             const slotItems = getSlotItems(slot)
+            const selectedItem = getSelectedSlotGarment(slot, slotItems)
             return (
               <section key={slot} className="slot-panel">
                 <header>
@@ -407,28 +509,56 @@ function App() {
                     Quitar
                   </button>
                 </header>
+                <div className="carousel">
+                  <button type="button" className="carousel-nav" onClick={() => moveSlotSelection(slot, -1)}>
+                    ◀
+                  </button>
+                  <article className="carousel-main">
+                    {selectedItem ? (
+                      <>
+                        {selectedItem.imageDataUrl ? (
+                          <img src={selectedItem.imageDataUrl} alt={selectedItem.name} />
+                        ) : (
+                          <div className="img-fallback large">Sin foto</div>
+                        )}
+                        <strong>{selectedItem.category}</strong>
+                        <span>{selectedItem.brand} · {selectedItem.color}</span>
+                      </>
+                    ) : (
+                      <p className="hint">No hay prendas limpias para este bloque.</p>
+                    )}
+                  </article>
+                  <button type="button" className="carousel-nav" onClick={() => moveSlotSelection(slot, 1)}>
+                    ▶
+                  </button>
+                </div>
+
                 <div className="horizontal-scroll">
                   {slotItems.map((garment) => (
                     <button
                       key={garment.id}
                       type="button"
-                      className={clsx('choice-card', selectedBySlot[slot] === garment.id && 'selected')}
-                      onClick={() =>
+                      className={clsx('choice-card', selectedItem?.id === garment.id && 'selected')}
+                      onClick={() => {
+                        const garmentId = garment.id
+                        if (typeof garmentId !== 'number') {
+                          return
+                        }
+
                         setSelectedBySlot((prev) => ({
                           ...prev,
-                          [slot]: garment.id!,
+                          [slot]: garmentId,
                         }))
-                      }
+                      }}
                     >
                       {garment.imageDataUrl ? (
                         <img src={garment.imageDataUrl} alt={garment.name} />
                       ) : (
                         <div className="img-fallback small">Sin foto</div>
                       )}
-                      <span>{garment.name}</span>
+                      <span>{garment.category}</span>
                     </button>
                   ))}
-                  {!slotItems.length && <p className="hint">No hay prendas limpias en este bloque.</p>}
                 </div>
               </section>
             )
@@ -480,7 +610,7 @@ function App() {
                   <p>{outfitStatus(outfit)}</p>
                   <small>
                     {outfit.garmentIds
-                      .map((id) => garments.find((g) => g.id === id)?.name)
+                      .map((id) => garments.find((g) => g.id === id)?.category)
                       .filter(Boolean)
                       .join(' · ')}
                   </small>
