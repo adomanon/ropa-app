@@ -11,8 +11,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'icons.svg'],
       manifest: {
-        name: 'Rosa Closet',
-        short_name: 'RosaCloset',
+        name: 'Colset Digital',
+        short_name: 'Colset',
         description: 'Armario digital para crear outfits y gestionar prendas.',
         theme_color: '#ff4fa1',
         background_color: '#fff8fc',
