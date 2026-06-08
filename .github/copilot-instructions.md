@@ -1,0 +1,6 @@
+- [x] Clarificar requisitos: app movil de ropa con filtros, outfits, offline y almacenamiento local.
+- [x] Scaffold del proyecto con React + TypeScript + Vite.
+- [x] Personalizacion funcional: carga de prendas, estado limpia/sucia, combinador y galeria de outfits.
+- [x] Soporte offline con PWA.
+- [x] Documentacion en README con uso y deploy a GitHub Pages.
+- [x] Compilacion validada con npm run build.
