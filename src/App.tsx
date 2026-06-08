@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import './App.css'
-import { appDb, ensureSeedData } from './db'
+import { appDb, ensureSeedData, exportAppData, importAppData } from './db'
 import { fileToOptimizedDataUrl, processImageForWardrobe } from './lib/image'
 import type { Garment, GarmentStatus, Outfit } from './types'
 import { CATEGORIES, COLOR_OPTIONS } from './types'
@@ -37,8 +37,12 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabId>('armario')
   const [garments, setGarments] = useState<Garment[]>([])
   const [outfits, setOutfits] = useState<Outfit[]>([])
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settingsMessage, setSettingsMessage] = useState('')
+  const [isImportingBackup, setIsImportingBackup] = useState(false)
   const [selectedBySlot, setSelectedBySlot] = useState<Record<string, number>>({})
   const [builderSlots, setBuilderSlots] = useState<string[]>(['Tops', 'Pantalones', 'Calzado'])
+  const backupInputRef = useRef<HTMLInputElement>(null)
 
   const [filters, setFilters] = useState({
     brand: 'Todas',
@@ -128,6 +132,7 @@ function App() {
       size: form.size.trim() || 'N/A',
       notes: form.notes.trim(),
       status: form.status,
+      isFavorite: false,
       imageDataUrl,
       createdAt: Date.now(),
     })
@@ -170,6 +175,15 @@ function App() {
     await loadData()
   }
 
+  async function toggleGarmentFavorite(garment: Garment) {
+    if (!garment.id) {
+      return
+    }
+
+    await appDb.garments.update(garment.id, { isFavorite: !garment.isFavorite })
+    await loadData()
+  }
+
   async function deleteGarment(garment: Garment) {
     if (!garment.id) {
       return
@@ -204,7 +218,13 @@ function App() {
 
   function getSlotItems(slot: string) {
     const categories = slotGroups[slot] ?? [slot]
-    return garments.filter((g) => categories.includes(g.category) && g.status === 'clean')
+    return garments
+      .filter((g) => categories.includes(g.category) && g.status === 'clean')
+      .sort(
+        (left, right) =>
+          Number(Boolean(right.isFavorite)) - Number(Boolean(left.isFavorite)) ||
+          right.createdAt - left.createdAt,
+      )
   }
 
   function getSelectedSlotGarment(slot: string, slotItems: Garment[]) {
@@ -231,6 +251,17 @@ function App() {
     }
 
     setSelectedBySlot((prev) => ({ ...prev, [slot]: nextGarmentId }))
+  }
+
+  function selectGarmentForSlot(slot: string, garmentId?: number) {
+    if (typeof garmentId !== 'number') {
+      return
+    }
+
+    setSelectedBySlot((prev) => ({
+      ...prev,
+      [slot]: garmentId,
+    }))
   }
 
   const selectedGarments = useMemo(() => {
@@ -268,6 +299,48 @@ function App() {
     await loadData()
   }
 
+  async function handleExportBackup() {
+    const backup = await exportAppData()
+    const backupBlob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
+    const backupUrl = URL.createObjectURL(backupBlob)
+    const downloadLink = document.createElement('a')
+    const backupDate = new Date(backup.exportedAt).toISOString().slice(0, 10)
+
+    downloadLink.href = backupUrl
+    downloadLink.download = `colset-digital-backup-${backupDate}.json`
+    downloadLink.click()
+    URL.revokeObjectURL(backupUrl)
+
+    setSettingsMessage('Copia exportada en JSON.')
+  }
+
+  async function handleImportBackup(file?: File) {
+    if (!file) {
+      return
+    }
+
+    setIsImportingBackup(true)
+    setSettingsMessage('')
+
+    try {
+      const parsedBackup = JSON.parse(await file.text()) as Parameters<typeof importAppData>[0]
+      await importAppData(parsedBackup)
+      setSelectedBySlot({})
+      setBuilderSlots(['Tops', 'Pantalones', 'Calzado'])
+      setOutfitName('')
+      setOutfitImageDataUrl(undefined)
+      await loadData()
+      setSettingsMessage('Copia importada correctamente.')
+    } catch {
+      setSettingsMessage('No pude importar el archivo. Revisa que sea una copia valida.')
+    } finally {
+      setIsImportingBackup(false)
+      if (backupInputRef.current) {
+        backupInputRef.current.value = ''
+      }
+    }
+  }
+
   function outfitStatus(outfit: Outfit): string {
     const items = outfit.garmentIds
       .map((id) => garments.find((g) => g.id === id))
@@ -284,11 +357,62 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div>
-          <h1>Rosa Closet</h1>
-          <p>Tu armario digital offline</p>
+        <div className="topbar-copy">
+          <h1>Colset Digital</h1>
+          <p>Tu armario digital offline con respaldo local</p>
         </div>
+        <button
+          type="button"
+          className={clsx('settings-toggle', isSettingsOpen && 'active')}
+          onClick={() => setIsSettingsOpen((prev) => !prev)}
+          aria-label="Abrir configuracion"
+          aria-expanded={isSettingsOpen}
+        >
+          ⚙
+        </button>
       </header>
+
+      {isSettingsOpen && (
+        <section className="panel settings-panel">
+          <div className="settings-header">
+            <div>
+              <h2>Configuracion</h2>
+              <p className="hint">Guarda una copia de tus prendas y outfits en un JSON para restaurarla cuando quieras.</p>
+            </div>
+            <button type="button" onClick={() => setIsSettingsOpen(false)}>
+              Cerrar
+            </button>
+          </div>
+
+          <div className="settings-actions">
+            <button type="button" className="cta secondary-cta" onClick={() => void handleExportBackup()}>
+              Exportar datos
+            </button>
+            <button
+              type="button"
+              className="cta secondary-cta"
+              onClick={() => backupInputRef.current?.click()}
+              disabled={isImportingBackup}
+            >
+              {isImportingBackup ? 'Importando...' : 'Importar datos'}
+            </button>
+            <input
+              ref={backupInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden-input"
+              onChange={(event) => void handleImportBackup(event.target.files?.[0])}
+            />
+          </div>
+
+          <div className="settings-note">
+            <strong>Incluye:</strong>
+            <span>prendas, favoritas, fotos guardadas y outfits.</span>
+          </div>
+
+          {settingsMessage && <p className="hint settings-feedback">{settingsMessage}</p>}
+        </section>
+      )}
 
       <nav className="tabs">
         {tabs.map((tab) => (
@@ -449,6 +573,9 @@ function App() {
                   <span>{garment.notes || 'Sin notas'}</span>
                 </div>
                 <div className="card-actions">
+                  <button type="button" onClick={() => void toggleGarmentFavorite(garment)}>
+                    {garment.isFavorite ? 'Quitar favorita' : 'Marcar favorita'}
+                  </button>
                   <button type="button" onClick={() => void toggleGarmentStatus(garment)}>
                     {garment.status === 'clean' ? 'Marcar sucia' : 'Marcar limpia'}
                   </button>
@@ -466,7 +593,7 @@ function App() {
       {activeTab === 'combinar' && (
         <section className="panel">
           <h2>Creador de combinaciones</h2>
-          <p className="hint">Desliza hacia los lados o usa las flechas para cambiar la prenda de cada bloque.</p>
+          <p className="hint">La seleccion ahora se organiza como galeria: primero favoritas y luego el resto, con mas aire entre prendas.</p>
 
           <div className="slot-actions">
             <select
@@ -492,10 +619,19 @@ function App() {
           {builderSlots.map((slot) => {
             const slotItems = getSlotItems(slot)
             const selectedItem = getSelectedSlotGarment(slot, slotItems)
+            const favoriteItems = slotItems.filter((garment) => garment.isFavorite)
+            const regularItems = slotItems.filter((garment) => !garment.isFavorite)
+
             return (
               <section key={slot} className="slot-panel">
                 <header>
-                  <h3>{slot}</h3>
+                  <div>
+                    <h3>{slot}</h3>
+                    <p className="slot-summary">
+                      {slotItems.length} disponible{slotItems.length === 1 ? '' : 's'}
+                      {favoriteItems.length > 0 ? ` · ${favoriteItems.length} favorita${favoriteItems.length === 1 ? '' : 's'}` : ''}
+                    </p>
+                  </div>
                   <button
                     type="button"
                     onClick={() => {
@@ -521,8 +657,15 @@ function App() {
                         ) : (
                           <div className="img-fallback large">Sin foto</div>
                         )}
+                        <div className="badge-row">
+                          <span className="badge">{selectedItem.category}</span>
+                          {selectedItem.isFavorite && <span className="badge badge-favorite">Favorita</span>}
+                        </div>
                         <strong>{selectedItem.category}</strong>
                         <span>{selectedItem.brand} · {selectedItem.color}</span>
+                        <button type="button" onClick={() => void toggleGarmentFavorite(selectedItem)}>
+                          {selectedItem.isFavorite ? 'Quitar de favoritas' : 'Guardar en favoritas'}
+                        </button>
                       </>
                     ) : (
                       <p className="hint">No hay prendas limpias para este bloque.</p>
@@ -533,33 +676,67 @@ function App() {
                   </button>
                 </div>
 
-                <div className="horizontal-scroll">
-                  {slotItems.map((garment) => (
-                    <button
-                      key={garment.id}
-                      type="button"
-                      className={clsx('choice-card', selectedItem?.id === garment.id && 'selected')}
-                      onClick={() => {
-                        const garmentId = garment.id
-                        if (typeof garmentId !== 'number') {
-                          return
-                        }
+                {slotItems.length > 0 && (
+                  <div className="picker-sheet">
+                    {favoriteItems.length > 0 && (
+                      <section className="picker-group">
+                        <div className="picker-group-header">
+                          <strong>Favoritas</strong>
+                          <span>{favoriteItems.length}</span>
+                        </div>
+                        <div className="picker-grid">
+                          {favoriteItems.map((garment) => (
+                            <button
+                              key={garment.id}
+                              type="button"
+                              className={clsx('choice-card', selectedItem?.id === garment.id && 'selected')}
+                              onClick={() => selectGarmentForSlot(slot, garment.id)}
+                            >
+                              {garment.imageDataUrl ? (
+                                <img src={garment.imageDataUrl} alt={garment.name} />
+                              ) : (
+                                <div className="img-fallback small">Sin foto</div>
+                              )}
+                              <div className="choice-meta">
+                                <strong>{garment.brand}</strong>
+                                <span>{garment.color}</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    )}
 
-                        setSelectedBySlot((prev) => ({
-                          ...prev,
-                          [slot]: garmentId,
-                        }))
-                      }}
-                    >
-                      {garment.imageDataUrl ? (
-                        <img src={garment.imageDataUrl} alt={garment.name} />
-                      ) : (
-                        <div className="img-fallback small">Sin foto</div>
-                      )}
-                      <span>{garment.category}</span>
-                    </button>
-                  ))}
-                </div>
+                    {regularItems.length > 0 && (
+                      <section className="picker-group">
+                        <div className="picker-group-header">
+                          <strong>{favoriteItems.length > 0 ? 'Mas opciones' : 'Disponibles'}</strong>
+                          <span>{regularItems.length}</span>
+                        </div>
+                        <div className="picker-grid">
+                          {regularItems.map((garment) => (
+                            <button
+                              key={garment.id}
+                              type="button"
+                              className={clsx('choice-card', selectedItem?.id === garment.id && 'selected')}
+                              onClick={() => selectGarmentForSlot(slot, garment.id)}
+                            >
+                              {garment.imageDataUrl ? (
+                                <img src={garment.imageDataUrl} alt={garment.name} />
+                              ) : (
+                                <div className="img-fallback small">Sin foto</div>
+                              )}
+                              <div className="choice-meta">
+                                <strong>{garment.brand}</strong>
+                                <span>{garment.color}</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+                  </div>
+                )}
               </section>
             )
           })}

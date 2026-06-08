@@ -9,6 +9,7 @@ export interface Garment {
   size: string
   notes: string
   status: GarmentStatus
+  isFavorite?: boolean
   imageDataUrl?: string
   createdAt: number
 }
